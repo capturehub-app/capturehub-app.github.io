@@ -285,6 +285,107 @@
       pointer-events: none;
     }
 
+    .ink-only-canvas {
+      min-height: 420px;
+    }
+
+    .tags-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .tag-pill {
+      display: inline-block;
+      background: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+    }
+
+    .summary-box {
+      margin-bottom: 18px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: var(--md-surface-container-high);
+      border: 1px solid var(--md-outline);
+    }
+
+    .section-kicker {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--md-primary);
+      margin-bottom: 6px;
+    }
+
+    .note-callout {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: var(--md-surface);
+      border: 1px solid var(--md-outline);
+    }
+
+    .block-list-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .block-list-marker {
+      min-width: 1.4em;
+      font-weight: 700;
+      color: var(--md-primary);
+      user-select: none;
+    }
+
+    .block-link:hover {
+      opacity: 0.9;
+      text-decoration: underline;
+    }
+
+    .block-link-url {
+      font-size: 0.82rem;
+      font-weight: 400;
+      color: var(--md-on-surface-variant);
+      word-break: break-all;
+      display: block;
+      margin-top: 2px;
+    }
+
+    .block-image-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .block-caption {
+      font-size: 0.82rem;
+      color: var(--md-on-surface-variant);
+      font-style: italic;
+    }
+
+    .code-lang {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #9da7b3;
+      margin-bottom: 6px;
+      font-family: system-ui, sans-serif;
+    }
+
+    .inline-link {
+      color: var(--md-primary);
+      text-decoration: underline;
+      word-break: break-all;
+    }
+
     .notice-omitted {
       margin-top: 18px;
       padding: 12px 16px;
@@ -297,6 +398,12 @@
     .error-state {
       text-align: center;
       padding: 48px 16px;
+    }
+
+    .error-detail {
+      margin-top: 12px;
+      font-size: 0.82rem;
+      color: var(--md-on-surface-variant);
     }
   </style>
 </head>
@@ -323,12 +430,49 @@
   </main>
 
   <script>
-    async function inflateUrlSafe(encoded) {
-      let b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const RELAY_BASE_URL = 'https://capturehub-relay.capturehub-cloud.workers.dev';
+
+    function extractTokenParam(key) {
+      const sources = [
+        (window.location.hash || '').replace(/^#/, ''),
+        (window.location.search || '').replace(/^\?/, '')
+      ];
+      for (const raw of sources) {
+        if (!raw) continue;
+        for (const pair of raw.split('&')) {
+          if (!pair) continue;
+          const eq = pair.indexOf('=');
+          if (eq <= 0) continue;
+          const k = pair.slice(0, eq).trim();
+          if (k === key) {
+            const val = pair.slice(eq + 1).trim();
+            if (!val) continue;
+            try {
+              return decodeURIComponent(val).trim();
+            } catch {
+              return val;
+            }
+          }
+        }
+      }
+      return '';
+    }
+
+    function decodeBase64UrlBytes(encoded) {
+      let b64 = (encoded || '').trim().replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
       while (b64.length % 4 !== 0) b64 += '=';
       const binary = atob(b64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    async function inflateBytes(bytes) {
+      if (typeof DecompressionStream === 'undefined') {
+        const err = new Error('DecompressionStream not supported');
+        err.code = 'UNSUPPORTED_BROWSER';
+        throw err;
+      }
       const ds = new DecompressionStream('deflate');
       const writer = ds.writable.getWriter();
       writer.write(bytes);
@@ -337,30 +481,281 @@
       return JSON.parse(out);
     }
 
+    async function inflateUrlSafe(encoded) {
+      return inflateBytes(decodeBase64UrlBytes(encoded));
+    }
+
+    async function fetchAndDecryptShortLink(shortToken) {
+      const parts = (shortToken || '').split('.');
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        const err = new Error('Invalid token format');
+        err.code = 'INVALID_TOKEN';
+        throw err;
+      }
+      if (!window.crypto || !window.crypto.subtle) {
+        const err = new Error('WebCrypto unavailable');
+        err.code = 'UNSUPPORTED_BROWSER';
+        throw err;
+      }
+      const [id, keyB64] = parts;
+      let res;
+      try {
+        res = await fetch(`${RELAY_BASE_URL}/s/${encodeURIComponent(id)}`);
+      } catch (networkErr) {
+        const err = new Error('Network error');
+        err.code = 'NETWORK';
+        throw err;
+      }
+      if (res.status === 404) {
+        const err = new Error('Note not found or expired');
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+      if (!res.ok) {
+        const err = new Error(`Relay HTTP ${res.status}`);
+        err.code = 'RELAY_ERROR';
+        throw err;
+      }
+      const combined = decodeBase64UrlBytes(await res.text());
+      if (combined.length <= 28) {
+        const err = new Error('Corrupted blob');
+        err.code = 'CORRUPTED';
+        throw err;
+      }
+      const iv = combined.slice(0, 12);
+      const cipherBytes = combined.slice(12);
+      const keyBytes = decodeBase64UrlBytes(keyB64);
+      let plainCompressed;
+      try {
+        const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+        plainCompressed = new Uint8Array(
+          await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, cipherBytes)
+        );
+      } catch {
+        const err = new Error('Decryption failed');
+        err.code = 'DECRYPT_FAILED';
+        throw err;
+      }
+      return inflateBytes(plainCompressed);
+    }
+
     function escapeHtml(str) {
-      return (str || '').replace(/[&<>"']/g, m => ({
+      return String(str ?? '').replace(/[&<>"']/g, m => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       })[m]);
     }
 
+    function sanitizeHttpUrl(raw) {
+      const s = String(raw || '').trim();
+      if (!s) return '';
+      try {
+        const u = new URL(s);
+        if (u.protocol === 'http:' || u.protocol === 'https:') {
+          return u.href;
+        }
+      } catch {}
+      return '';
+    }
+
+    function linkifyPlainText(text) {
+      const raw = String(text ?? '');
+      const urlRegex = /(https?:\/\/[^\s<>"')\]\}]+)/gi;
+      let out = '';
+      let lastIndex = 0;
+      let match;
+      while ((match = urlRegex.exec(raw)) !== null) {
+        if (match.index > lastIndex) {
+          out += escapeHtml(raw.slice(lastIndex, match.index));
+        }
+        const safeUrl = sanitizeHttpUrl(match[0]);
+        if (safeUrl) {
+          out += `<a class="inline-link" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match[0])}</a>`;
+        } else {
+          out += escapeHtml(match[0]);
+        }
+        lastIndex = urlRegex.lastIndex;
+      }
+      if (lastIndex < raw.length) {
+        out += escapeHtml(raw.slice(lastIndex));
+      }
+      return out;
+    }
+
+    function argbToCssColor(val) {
+      if (val === null || val === undefined || typeof val !== 'number' || !Number.isFinite(val)) return '';
+      const c = (val >>> 0);
+      const a = ((c >>> 24) & 0xFF) / 255;
+      const r = (c >>> 16) & 0xFF;
+      const g = (c >>> 8) & 0xFF;
+      const b = c & 0xFF;
+      return `rgba(${r},${g},${b},${a.toFixed(2)})`;
+    }
+
+    function renderTextWithRuns(text, block) {
+      const raw = String(text ?? '');
+      const runs = Array.isArray(block?.runs) ? block.runs : [];
+      if (!raw || runs.length === 0) {
+        return linkifyPlainText(raw);
+      }
+
+      const len = raw.length;
+      const points = new Set([0, len]);
+      const validRuns = [];
+      for (const r of runs) {
+        if (!r || typeof r.start !== 'number' || typeof r.end !== 'number') continue;
+        const start = Math.max(0, Math.min(len, r.start));
+        const end = Math.max(0, Math.min(len, r.end));
+        if (end <= start) continue;
+        points.add(start);
+        points.add(end);
+        validRuns.push({ ...r, start, end });
+      }
+      if (validRuns.length === 0) {
+        return linkifyPlainText(raw);
+      }
+
+      const cuts = Array.from(points).sort((a, b) => a - b);
+      let html = '';
+      for (let i = 0; i < cuts.length - 1; i++) {
+        const segStart = cuts[i];
+        const segEnd = cuts[i + 1];
+        if (segEnd <= segStart) continue;
+        const chunk = raw.slice(segStart, segEnd);
+        const active = validRuns.filter(r => r.start <= segStart && r.end >= segEnd);
+        if (active.length === 0) {
+          html += linkifyPlainText(chunk);
+          continue;
+        }
+        let bold = false;
+        let italic = false;
+        let underline = false;
+        let strike = false;
+        let color = '';
+        let highlight = '';
+        let fontSize = null;
+        for (const r of active) {
+          if (r.bold) bold = true;
+          if (r.italic) italic = true;
+          if (r.underline) underline = true;
+          if (r.strike) strike = true;
+          if (r.color !== undefined && r.color !== null) color = argbToCssColor(r.color);
+          if (r.highlight !== undefined && r.highlight !== null) highlight = argbToCssColor(r.highlight);
+          if (typeof r.fontSize === 'number' && Number.isFinite(r.fontSize) && Math.abs(r.fontSize - 16) > 0.5) {
+            fontSize = Math.max(10, Math.min(48, r.fontSize));
+          }
+        }
+        const decorations = [];
+        if (underline) decorations.push('underline');
+        if (strike) decorations.push('line-through');
+        const styles = [
+          bold ? 'font-weight:700' : '',
+          italic ? 'font-style:italic' : '',
+          decorations.length ? `text-decoration:${decorations.join(' ')}` : '',
+          color ? `color:${color}` : '',
+          highlight ? `background-color:${highlight};padding:0 2px;border-radius:4px` : '',
+          fontSize ? `font-size:${(fontSize / 16).toFixed(2)}rem` : ''
+        ].filter(Boolean).join(';');
+        const inner = linkifyPlainText(chunk);
+        html += styles ? `<span style="${styles}">${inner}</span>` : inner;
+      }
+      return html;
+    }
+
+    function blockInlineStyle(b) {
+      const decorations = [];
+      if (b.isUnderline) decorations.push('underline');
+      if (b.isStrikethrough) decorations.push('line-through');
+      const color = argbToCssColor(b.color);
+      const highlight = argbToCssColor(b.highlightColor);
+      const fs = (typeof b.fontSize === 'number' && Number.isFinite(b.fontSize) && Math.abs(b.fontSize - 16) > 0.5)
+        ? `font-size:${(Math.max(10, Math.min(48, b.fontSize)) / 16).toFixed(2)}rem`
+        : '';
+      return [
+        b.isBold ? 'font-weight:700' : '',
+        b.isItalic ? 'font-style:italic' : '',
+        decorations.length ? `text-decoration:${decorations.join(' ')}` : '',
+        color ? `color:${color}` : '',
+        highlight ? `background-color:${highlight};border-radius:6px;padding:2px 4px` : '',
+        fs
+      ].filter(Boolean).join(';');
+    }
+
     function renderInkSvg(inkLayer) {
       if (!inkLayer || !inkLayer.page || !Array.isArray(inkLayer.page.strokes) || inkLayer.page.strokes.length === 0) {
-        return '';
+        return { html: '', height: 0 };
       }
-      const h = inkLayer.page.height || 1000;
+      const w = inkLayer.page.width || 1000;
+      const h = inkLayer.page.height || 1400;
       let paths = '';
       for (const s of inkLayer.page.strokes) {
-        if (!s.points || s.points.length === 0) continue;
-        const d = s.points.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-        const colorInt = (s.color >>> 0);
-        const a = ((colorInt >> 24) & 0xFF) / 255;
-        const r = (colorInt >> 16) & 0xFF;
-        const g = (colorInt >> 8) & 0xFF;
+        if (!Array.isArray(s.points) || s.points.length === 0) continue;
+        const coords = [];
+        for (const pt of s.points) {
+          const x = Array.isArray(pt) ? pt[0] : pt?.x;
+          const y = Array.isArray(pt) ? pt[1] : pt?.y;
+          if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {
+            coords.push({ x, y });
+          }
+        }
+        if (coords.length === 0) continue;
+        const d = coords.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        const colorInt = ((s.color ?? 0xFF202124) >>> 0);
+        const a = ((colorInt >>> 24) & 0xFF) / 255;
+        const r = (colorInt >>> 16) & 0xFF;
+        const g = (colorInt >>> 8) & 0xFF;
         const b = colorInt & 0xFF;
         const strokeColor = `rgba(${r},${g},${b},${(a * (s.opacity ?? 1)).toFixed(2)})`;
         paths += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${s.width || 4}" stroke-linecap="round" stroke-linejoin="round" />`;
       }
-      return `<svg class="ink-overlay" viewBox="0 0 1000 ${h}" preserveAspectRatio="xMidYMin slice">${paths}</svg>`;
+      if (!paths) return { html: '', height: 0 };
+      return {
+        html: `<svg class="ink-overlay" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMin meet">${paths}</svg>`,
+        height: h
+      };
+    }
+
+    function typeLabel(type) {
+      switch (String(type || '').toUpperCase()) {
+        case 'LINK': return 'Link';
+        case 'VOICE': return 'Nota vocale';
+        case 'VIDEO': return 'Video';
+        case 'IMAGE':
+        case 'PHOTO':
+        case 'SCREENSHOT':
+        case 'SCAN':
+          return 'Immagine';
+        case 'DOCUMENT':
+        case 'FILE':
+          return 'Documento';
+        default:
+          return '';
+      }
+    }
+
+    function renderLinkCard(url, title) {
+      const safeUrl = sanitizeHttpUrl(url);
+      if (!safeUrl) {
+        return `<p class="block-p">${escapeHtml(title || url)}</p>`;
+      }
+      return `<a class="block-link" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">
+        <span>🔗</span>
+        <span>
+          ${escapeHtml(title || safeUrl)}
+          ${title && title !== safeUrl ? `<span class="block-link-url">${escapeHtml(safeUrl)}</span>` : ''}
+        </span>
+      </a>`;
+    }
+
+    function renderPlainBody(content, type) {
+      const text = String(content || '').trim();
+      if (!text) return '';
+      if (String(type || '').toUpperCase() === 'LINK') {
+        const directUrl = sanitizeHttpUrl(text);
+        if (directUrl) {
+          return renderLinkCard(directUrl, directUrl);
+        }
+      }
+      return text.split(/\n{2,}/).map(chunk => `<p class="block-p">${linkifyPlainText(chunk)}</p>`).join('');
     }
 
     function renderNote(pkg) {
@@ -371,88 +766,190 @@
 
       let bodyHtml = '';
       let inkOverlayHtml = '';
+      let hasInk = false;
 
       try {
         const parsed = JSON.parse(pkg.content);
         if (parsed && parsed.isRichNote && Array.isArray(parsed.blocks)) {
+          const numberedCounters = {};
           for (const b of parsed.blocks) {
+            if (!b || !b.type) continue;
             if (b.type === 'ink') {
-              inkOverlayHtml += renderInkSvg(b);
+              const svg = renderInkSvg(b);
+              inkOverlayHtml += svg.html;
+              if (svg.html) hasInk = true;
             } else if (b.type === 'paragraph') {
-              const style = [
-                b.isBold ? 'font-weight:700' : '',
-                b.isItalic ? 'font-style:italic' : '',
-                b.isUnderline ? 'text-decoration:underline' : '',
-                b.isStrikethrough ? 'text-decoration:line-through' : '',
-                b.indentLevel ? `margin-left:${b.indentLevel * 22}px` : ''
-              ].filter(Boolean).join(';');
-              if (b.listType === 'CHECK') {
-                bodyHtml += `<div class="block-check" style="margin-left:${(b.indentLevel || 0) * 22}px">
+              const listType = String(b.listType || '').toLowerCase();
+              const indent = Math.max(0, b.indentLevel || 0);
+              const style = blockInlineStyle(b);
+              const marginStyle = indent ? `margin-left:${indent * 22}px` : '';
+              const textHtml = renderTextWithRuns(b.text, b);
+
+              if (listType !== 'numbered') {
+                for (const key of Object.keys(numberedCounters)) {
+                  if (Number(key) >= indent) delete numberedCounters[key];
+                }
+              }
+
+              if (listType === 'check') {
+                bodyHtml += `<div class="block-check" style="${marginStyle}">
                   <input type="checkbox" disabled ${b.isChecked ? 'checked' : ''} />
-                  <span class="${b.isChecked ? 'checked-text' : ''}" style="${style}">${escapeHtml(b.text)}</span>
+                  <span class="${b.isChecked ? 'checked-text' : ''}" style="${style}">${textHtml}</span>
                 </div>`;
-              } else if (b.listType === 'BULLET') {
-                bodyHtml += `<p class="block-p" style="${style}">• ${escapeHtml(b.text)}</p>`;
+              } else if (listType === 'bullet') {
+                const bullet = indent > 0 ? '○' : '•';
+                bodyHtml += `<div class="block-list-item" style="${marginStyle}">
+                  <span class="block-list-marker">${bullet}</span>
+                  <div class="block-p" style="margin-bottom:0;${style}">${textHtml}</div>
+                </div>`;
+              } else if (listType === 'numbered') {
+                numberedCounters[indent] = (numberedCounters[indent] || 0) + 1;
+                bodyHtml += `<div class="block-list-item" style="${marginStyle}">
+                  <span class="block-list-marker">${numberedCounters[indent]}.</span>
+                  <div class="block-p" style="margin-bottom:0;${style}">${textHtml}</div>
+                </div>`;
               } else {
-                bodyHtml += `<p class="block-p" style="${style}">${escapeHtml(b.text)}</p>`;
+                bodyHtml += `<p class="block-p" style="${[marginStyle, style].filter(Boolean).join(';')}">${textHtml}</p>`;
               }
             } else if (b.type === 'quote') {
-              bodyHtml += `<blockquote class="block-quote">${escapeHtml(b.text)}</blockquote>`;
+              const style = blockInlineStyle(b);
+              bodyHtml += `<blockquote class="block-quote" style="${style}">${renderTextWithRuns(b.text, b)}</blockquote>`;
             } else if (b.type === 'code') {
-              bodyHtml += `<pre class="block-code"><code>${escapeHtml(b.code)}</code></pre>`;
+              const langLabel = b.language ? `<div class="code-lang">${escapeHtml(b.language)}</div>` : '';
+              bodyHtml += `<pre class="block-code">${langLabel}<code>${escapeHtml(b.code)}</code></pre>`;
             } else if (b.type === 'divider') {
               bodyHtml += `<hr class="block-divider" />`;
             } else if (b.type === 'link') {
-              bodyHtml += `<a class="block-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener">🔗 ${escapeHtml(b.title || b.url)}</a>`;
+              bodyHtml += renderLinkCard(b.url, b.title);
             } else if (b.type === 'table') {
               const cols = (b.columns || []).map(c => `<th>${escapeHtml(c)}</th>`).join('');
-              const rows = (b.rows || []).map(r => `<tr>${r.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('');
+              const rows = (b.rows || []).map(r => `<tr>${(r || []).map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('');
               bodyHtml += `<div class="block-table-wrap"><table><thead><tr>${cols}</tr></thead><tbody>${rows}</tbody></table></div>`;
             } else if (b.type === 'image') {
-              const uris = (b.uris && b.uris.length ? b.uris : (b.uri ? [b.uri] : []))
-                .filter(u => u.startsWith('data:image/') || u.startsWith('https://'));
+              const rawUris = [];
+              if (Array.isArray(b.uris)) rawUris.push(...b.uris);
+              if (Array.isArray(b.assets)) {
+                for (const a of b.assets) {
+                  if (a && typeof a.uri === 'string') rawUris.push(a.uri);
+                }
+              }
+              if (typeof b.uri === 'string' && b.uri) rawUris.push(b.uri);
+              const seen = new Set();
+              const uris = rawUris.filter(u => {
+                if (typeof u !== 'string' || seen.has(u)) return false;
+                seen.add(u);
+                return u.startsWith('data:image/') || sanitizeHttpUrl(u) !== '';
+              });
               if (uris.length > 0) {
-                bodyHtml += `<div class="block-images">${uris.map(u => `<img src="${u}" alt="${escapeHtml(b.caption)}" />`).join('')}</div>`;
+                const imgs = uris.map(u => `<img src="${escapeHtml(u)}" alt="${escapeHtml(b.caption || 'Immagine nota')}" />`).join('');
+                const cap = b.caption ? `<div class="block-caption">${escapeHtml(b.caption)}</div>` : '';
+                bodyHtml += `<div class="block-image-card"><div class="block-images">${imgs}</div>${cap}</div>`;
               }
             }
           }
         } else {
-          bodyHtml = `<p class="block-p">${escapeHtml(pkg.content)}</p>`;
+          bodyHtml = renderPlainBody(pkg.content, pkg.type);
         }
       } catch {
-        bodyHtml = `<p class="block-p">${escapeHtml(pkg.content || pkg.note || '')}</p>`;
+        bodyHtml = renderPlainBody(pkg.content, pkg.type);
       }
+
+      const rawSummary = String(pkg.summary || '').trim();
+      const summaryHtml = rawSummary
+        ? `<section class="summary-box">
+            <div class="section-kicker">Riassunto</div>
+            <p class="block-p" style="margin-bottom:0;">${linkifyPlainText(rawSummary)}</p>
+          </section>`
+        : '';
+
+      const rawNote = String(pkg.note || '').trim();
+      const noteHtml = rawNote && rawNote !== String(pkg.content || '').trim()
+        ? `<section class="note-callout">
+            <div class="section-kicker">Annotazione</div>
+            <p class="block-p" style="margin-bottom:0;">${linkifyPlainText(rawNote)}</p>
+          </section>`
+        : '';
+
+      const tags = Array.isArray(pkg.tags) ? pkg.tags.filter(t => typeof t === 'string' && t.trim()) : [];
+      const tagsHtml = tags.length > 0
+        ? `<div class="tags-row">${tags.map(t => `<span class="tag-pill">#${escapeHtml(t.trim())}</span>`).join('')}</div>`
+        : '';
+
+      const badge = typeLabel(pkg.type);
+      const badgeHtml = badge ? `<span class="readonly-pill">${escapeHtml(badge)}</span>` : '';
 
       const omittedNotice = pkg.hasOmittedMedia
         ? `<div class="notice-omitted">📎 Alcuni file multimediali pesanti o registrazioni audio originali sono stati omessi dal link rapido. Apri in CaptureHub o richiedi un'esportazione PDF per i file completi.</div>`
         : '';
+
+      const emptyFallback = hasInk ? '' : '<p class="block-p"><i>Nota senza contenuto testuale.</i></p>';
+      const bodyClass = `note-body${hasInk && !bodyHtml ? ' ink-only-canvas' : ''}`;
 
       card.innerHTML = `
         <header class="note-header">
           <h1 class="note-title">${escapeHtml(pkg.title || 'Nota condivisa')}</h1>
           <div class="note-meta">
             <span>${escapeHtml(dateStr)}</span>
+            ${badgeHtml}
             <span class="readonly-pill">Sola visualizzazione</span>
           </div>
+          ${tagsHtml}
         </header>
-        <div class="note-body">
-          ${bodyHtml || '<p class="block-p"><i>Nota senza contenuto testuale.</i></p>'}
+        ${summaryHtml}
+        <div class="${bodyClass}">
+          ${bodyHtml || emptyFallback}
           ${inkOverlayHtml}
         </div>
+        ${noteHtml}
         ${omittedNotice}
       `;
     }
 
-    (async () => {
-      const hash = window.location.hash || '';
-      const query = new URLSearchParams(window.location.search);
-      const encoded = hash.startsWith('#d=') ? hash.slice(3) : (query.get('d') || '');
+    function renderErrorMessage(err) {
+      const code = err?.code || '';
+      let title = 'Impossibile leggere la nota';
+      let desc = 'Il link potrebbe essere danneggiato, scaduto o incompleto.';
+      if (code === 'NOT_FOUND') {
+        title = 'Nota scaduta o non più disponibile';
+        desc = 'Questo link rapido è scaduto oppure è stato rimosso dal server. Chiedi a chi te lo ha inviato di rigenerare il link dall’app CaptureHub.';
+      } else if (code === 'NETWORK' || code === 'RELAY_ERROR') {
+        title = 'Errore di connessione';
+        desc = 'Non riesco a contattare il server per scaricare la nota. Controlla la connessione internet o eventuali blocchi DNS/VPN e riprova.';
+      } else if (code === 'INVALID_TOKEN' || code === 'DECRYPT_FAILED' || code === 'CORRUPTED') {
+        title = 'Link incompleto o danneggiato';
+        desc = 'Verifica di aver copiato l’intero link (compresa tutta la parte dopo "#s=").';
+      } else if (code === 'UNSUPPORTED_BROWSER') {
+        title = 'Browser non compatibile';
+        desc = 'Apri il link con una versione recente di Chrome, Edge o Safari per decifrare la nota in sicurezza.';
+      }
+      document.getElementById('noteCard').innerHTML = `
+        <div class="error-state">
+          <h2>${escapeHtml(title)}</h2>
+          <p style="margin-top:8px;opacity:0.82;">${escapeHtml(desc)}</p>
+        </div>`;
+    }
 
-      if (encoded) {
-        document.getElementById('openAppBtn').href = `capturehub://note?d=${encodeURIComponent(encoded)}`;
+    (async () => {
+      const shortToken = extractTokenParam('s');
+      const encoded = extractTokenParam('d');
+
+      const isAndroid = /Android/i.test(navigator.userAgent || '');
+      const openBtn = document.getElementById('openAppBtn');
+      if (shortToken) {
+        const sParam = encodeURIComponent(shortToken);
+        openBtn.href = isAndroid
+          ? `intent://note?s=${sParam}#Intent;scheme=capturehub;package=com.aistudio.capturehub.awenrx;action=android.intent.action.VIEW;S.browser_fallback_url=${encodeURIComponent(window.location.href)};end`
+          : `capturehub://note?s=${sParam}`;
+      } else if (encoded) {
+        const encodedParam = encodeURIComponent(encoded);
+        openBtn.href = isAndroid
+          ? `intent://note?d=${encodedParam}#Intent;scheme=capturehub;package=com.aistudio.capturehub.awenrx;action=android.intent.action.VIEW;S.browser_fallback_url=${encodeURIComponent(window.location.href)};end`
+          : `capturehub://note?d=${encodedParam}`;
+      } else if (isAndroid) {
+        openBtn.href = `intent://note#Intent;scheme=capturehub;package=com.aistudio.capturehub.awenrx;action=android.intent.action.VIEW;S.browser_fallback_url=${encodeURIComponent(window.location.href)};end`;
       }
 
-      if (!encoded) {
+      if (!shortToken && !encoded) {
         document.getElementById('noteCard').innerHTML = `
           <div class="error-state">
             <h2>Nessuna nota trovata nel link</h2>
@@ -462,14 +959,12 @@
       }
 
       try {
-        const pkg = await inflateUrlSafe(encoded);
+        const pkg = shortToken
+          ? await fetchAndDecryptShortLink(shortToken)
+          : await inflateUrlSafe(encoded);
         renderNote(pkg);
       } catch (err) {
-        document.getElementById('noteCard').innerHTML = `
-          <div class="error-state">
-            <h2>Impossibile leggere la nota</h2>
-            <p style="margin-top:8px;opacity:0.75;">Il link potrebbe essere danneggiato o incompleto.</p>
-          </div>`;
+        renderErrorMessage(err);
       }
     })();
   </script>
