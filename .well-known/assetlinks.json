@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.aistudio.capturehub.awenrx",
+      "sha256_cert_fingerprints": [
+        "F2:AB:0C:BE:38:E9:1B:34:B2:A5:C6:7A:3E:FE:EF:DB:1F:B4:3C:E6:0B:CD:9C:AC:36:5F:98:13:20:BD:58:B0"
+      ]
+    }
+  }
+]
